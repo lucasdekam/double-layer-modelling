@@ -7,3 +7,5 @@ beta = 1/k_B/T              # inverse thermal energy
 eps_0 = 8.8541878128e-12    # vacuum permittivity, F/m
 eps_r_water = 78.5          # relative permittivity of bulk water
 c_water_bulk = 55.5 * 1e3   # water bulk concentration (density/molar mass), mol/m^3
+N_sites = 5e18
+K_silica = 1e-6

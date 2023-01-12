@@ -4,7 +4,6 @@ from scipy.integrate import solve_bvp
 from abc import ABC, abstractmethod
 import os
 import pickle
-import pandas as pd
 import multiprocessing as mp
 from dataclasses import dataclass
 
@@ -39,7 +38,7 @@ class DoubleLayerModel(ABC):
         pass
 
     @abstractmethod
-    def getDoubleLayerModelSolution(self, x_nm, phi0_V):
+    def getDoubleLayerModelSolution(self, xmax_m, N, phi0_V):
         pass
 
 
@@ -59,7 +58,7 @@ class GuyChapman(DoubleLayerModel):
         ret = PotentialSweepSolution(phi=potential_V, charge=np.zeros(potential_V.shape), cap=cap)
         return ret
 
-    def getDoubleLayerModelSolution(self, x_nm, phi0_V):
+    def getDoubleLayerModelSolution(self, xmax_m, N, phi0_V):
         return None
 
 
@@ -78,16 +77,7 @@ class BorukhovAndelmanOrland(DoubleLayerModel):
         self.a = d_ions_m
         self.chi0 = 2 * d_ions_m ** 3 * self.n_0 
 
-    def capacitanceIntermediateStep_uFcm2(self, phi_V):
-        return np.sqrt(2) * self.kappa_debye * C.eps_r_water * C.eps_0 / np.sqrt(self.chi0) \
-            * self.chi0 * np.sinh(C.beta*C.z*C.e_0*phi_V) \
-            / (self.chi0 * np.cosh(C.beta*C.z*C.e_0*phi_V) - self.chi0 + 1) \
-            / (2*np.sqrt(np.log(self.chi0 * np.cosh(C.beta*C.z*C.e_0*phi_V) - self.chi0 + 1))) \
-            * 1e2 # uF/cm^2
-
     def getPotentialSweepSolution(self, potential_V):
-        # cap = self.capacitanceIntermediateStep_uFcm2(potential_V - self.pzc_V) * (potential_V > self.pzc_V) \
-        #     - self.capacitanceIntermediateStep_uFcm2(potential_V - self.pzc_V) * (potential_V <= self.pzc_V)
         cap = np.sqrt(2) * self.kappa_debye * C.eps_r_water * C.eps_0 / np.sqrt(self.chi0) \
             * self.chi0 * np.sinh(C.beta*C.z*C.e_0*np.abs(potential_V)) \
             / (self.chi0 * np.cosh(C.beta*C.z*C.e_0*potential_V) - self.chi0 + 1) \
@@ -96,9 +86,76 @@ class BorukhovAndelmanOrland(DoubleLayerModel):
         ret = PotentialSweepSolution(phi=potential_V, charge=np.zeros(potential_V.shape), cap=cap)
         return ret
 
+    def odeSystem(self, x, y):
+        """
+        System of dimensionless 1st order ODE's that we solve
 
-    def getDoubleLayerModelSolution(self, x_nm, phi0_V):
-        return None
+        x: dimensionless x-axis of length n, i.e. kappa (1/m) times x-position (m).
+        y: dimensionless potential phi and dphi/dx, size 2 x n.
+        """        
+        dy1 = y[1, :]
+        dy2 = np.sinh(y[0, :]) / (1 - self.chi0 + self.chi0 * np.cosh(y[0, :]))
+        
+        return np.vstack([dy1, dy2])
+
+    def bc(self, phi_bc_V):
+        """
+        Boundary conditions: fixed potential at the metal, zero potential at "infinity" (or: far enough away)
+
+        Returns a boundary condition function for use in scipy's solve_bvp
+        """
+        return lambda ya, yb : np.array([ya[0] - phi_bc_V * C.beta * C.z * C.e_0, yb[0]])   
+
+    def temp_pH_bc(self, pH_bulk):
+        a_H_bulk = 10 ** (-pH_bulk)
+        return lambda ya, yb : np.array([
+            C.eps_r_water * C.eps_0 * ya[1] * self.kappa_debye / (C.beta * C.z * C.e_0) \
+            - C.e_0 * C.N_sites * \
+            (C.K_silica * (1 - self.chi0 + self.chi0 * np.cosh(ya[0])))/ \
+            (C.K_silica * (1 - self.chi0 + self.chi0 * np.cosh(ya[0])) + a_H_bulk * np.exp(-ya[0])), 
+            yb[0]
+            ])   
+
+    # def getXAxis_m(self, xmax_m, N):
+    #     """
+    #     Get a logarithmically spaced x-axis, fine mesh close to electrode
+    #     """
+    #     xmax_nm = xmax_m * 1e9
+    #     expmax = np.log10(xmax_nm)
+    #     x = np.logspace(-9, expmax, N) - 1e-9
+    #     return x*1e-9
+
+    def getOdeSol(self, xmax_m, N, phi0_V, verbose=False):
+        """
+        Solve the ODE system 
+        """
+        x = self.kappa_debye * np.linspace(0, xmax_m, N) # dimensionless x-axis
+        y = np.zeros((2, x.shape[0])) 
+        
+        sol = solve_bvp(self.odeSystem, self.temp_pH_bc(7.0), x, y, max_nodes=1000000, verbose=verbose)
+
+        return sol
+
+    def getDoubleLayerModelSolution(self, xmax_m, N, phi0_V):
+        sol = self.getOdeSol(xmax_m, N, phi0_V, verbose=True)
+        BFc = np.exp(-sol.y[0, :])
+        BFa = np.exp(sol.y[0, :])
+        Omega = 1 - self.chi0 + self.chi0 * np.cosh(sol.y[0, :])
+
+        c_cat = self.n_0 * BFc / Omega / C.N_A / 1e3
+        c_an  = self.n_0 * BFa / Omega / C.N_A / 1e3
+        c_sol = np.zeros(sol.x.shape)
+
+        eps = np.ones(sol.x.shape) * C.eps_r_water
+        ret = DoubleLayerModelSolution(
+            x=sol.x / self.kappa_debye * 1e9, 
+            phi=sol.y[0, :] / (C.beta * C.z * C.e_0),
+            efield=-sol.y[1, :] * self.kappa_debye / (C.beta * C.z * C.e_0), 
+            c_cat=c_cat,
+            c_an=c_an,
+            c_sol=c_sol,
+            eps=eps)
+        return ret
 
 
 class Huang(DoubleLayerModel):
@@ -245,7 +302,7 @@ class Huang(DoubleLayerModel):
         ret = DoubleLayerModelSolution(
             x=sol.x / self.kappa * 1e9, 
             phi=sol.y[0, :] / (C.beta * C.z * C.e_0),
-            efield=sol.y[1, :] * self.kappa / (C.beta * C.z * C.e_0), 
+            efield=-sol.y[1, :] * self.kappa / (C.beta * C.z * C.e_0), 
             c_cat=c_cat,
             c_an=c_an,
             c_sol=c_sol,
