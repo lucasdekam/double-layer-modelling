@@ -41,6 +41,8 @@ class PotentialSweepSolution:
     phi:    np.ndarray
     charge: np.ndarray
     cap:    np.ndarray
+    c_surf: dict
+    efield: np.ndarray
     name:   str
 
 @dataclass
@@ -118,6 +120,10 @@ class DoubleLayerModel:
         Returns: charge for each potential; last solution
         """
         chg = np.zeros(potential.shape)
+        efield = np.zeros(potential.shape)
+        c_surf = {'Cations': np.zeros(potential.shape),
+                  'Anions': np.zeros(potential.shape),
+                  'Solvent': np.zeros(potential.shape)}
         max_res = np.zeros(potential.shape)
 
         x_axis = self.create_x_mesh(100, 1000)
@@ -129,6 +135,10 @@ class DoubleLayerModel:
             sol = self.odesolve_dirichlet(x_axis, y_initial, phi, tol=tol)
             last_profiles = self.compute_profiles(sol)
             chg[i] = last_profiles.efield[0] * C.EPS_0 * last_profiles.eps[0]
+            efield[i] = last_profiles.efield[0]
+            c_surf['Cations'][i] = last_profiles.c_dict['Cations'][0]
+            c_surf['Anions'][i] = last_profiles.c_dict['Anions'][0]
+            c_surf['Solvent'][i] = last_profiles.c_dict['Solvent'][0]
             max_res[i] = np.max(sol.rms_residuals)
 
             x_axis = sol.x
@@ -136,7 +146,7 @@ class DoubleLayerModel:
 
         print(f"Sweep from {potential[0]:.2f}V to {potential[-1]:.2f}V. " \
             + f"Maximum relative residual: {np.max(max_res):.5e}.")
-        return chg, last_profiles
+        return chg, efield, c_surf, last_profiles
 
     def sweep(self, potential: np.ndarray, tol: float=1e-3):
         """
@@ -145,20 +155,33 @@ class DoubleLayerModel:
         # Find potential closest to PZC
         i_pzc = np.argmin(np.abs(potential)).squeeze()
 
+        c_surf = {'Cations': np.zeros(potential.shape),
+                  'Anions': np.zeros(potential.shape),
+                  'Solvent': np.zeros(potential.shape)}
         chg = np.zeros(potential.shape)
-        chg_neg, _ = self.sequential_solve(potential[i_pzc::-1], tol)
+        efield = np.zeros(potential.shape)
+
+        chg_neg, efield_neg, c_surf_neg, _ = self.sequential_solve(potential[i_pzc::-1], tol)
         chg[:i_pzc+1] = chg_neg[::-1]
-        chg[i_pzc:], _ = self.sequential_solve(potential[i_pzc::1], tol)
+        efield[:i_pzc+1] = efield_neg[::-1]
+        c_surf['Cations'][:i_pzc+1] = c_surf_neg['Cations'][::-1]
+        c_surf['Anions'][:i_pzc+1] = c_surf_neg['Anions'][::-1]
+        c_surf['Solvent'][:i_pzc+1] = c_surf_neg['Solvent'][::-1]
+
+        chg[i_pzc:], efield[i_pzc:], c_surf_pos, _ = self.sequential_solve(potential[i_pzc::1], tol)
+        c_surf['Cations'][i_pzc:] = c_surf_pos['Cations']
+        c_surf['Anions'][i_pzc:] = c_surf_pos['Anions']
+        c_surf['Solvent'][i_pzc:] = c_surf_pos['Solvent']
 
         cap = np.gradient(chg, edge_order=2)/np.gradient(potential) * 1e2
-        return PotentialSweepSolution(phi=potential, charge=chg, cap=cap, name=self.name)
+        return PotentialSweepSolution(phi=potential, charge=chg, cap=cap, c_surf=c_surf, efield=efield, name=self.name)
 
     def spatial_profiles(self, phi0: float, tol: float=1e-3):
         """
         Get spatial profiles solution struct.
         """
         sign = phi0/abs(phi0)
-        _, profiles = self.sequential_solve(np.arange(0, phi0, sign*0.01), tol)
+        _, _, _, profiles = self.sequential_solve(np.arange(0, phi0, sign*0.01), tol)
         return profiles
 
     @abstractmethod
@@ -203,12 +226,17 @@ class GouyChapman(DoubleLayerModel):
         ion_concentration_molar: bulk ion concentration in molar
         potential: potential array in V
         """
+        c_surf = {'Cations': np.zeros(potential.shape),
+                  'Anions': np.zeros(potential.shape),
+                  'Solvent': np.zeros(potential.shape)}
+
         cap = self.kappa_debye * C.EPS_R_WATER * C.EPS_0 * \
             np.cosh(C.BETA*C.Z*C.E_0 * potential / 2) * 1e2
         chg = np.sqrt(8 * self.n_0 * C.K_B * C.T * C.EPS_R_WATER * C.EPS_0) * \
             np.sinh(C.BETA * C.Z * C.E_0 * potential / 2)
+        efield = np.zeros(potential.shape)
         return PotentialSweepSolution(
-            phi=potential, charge=chg, cap=cap, name=self.name + ' (Analytic)')
+            phi=potential, charge=chg, cap=cap, c_surf=c_surf, efield=efield, name=self.name + ' (Analytic)')
 
 
 class Borukhov(DoubleLayerModel):
@@ -264,6 +292,10 @@ class Borukhov(DoubleLayerModel):
         a_m: ion diameter in m
         potential: potential array in V
         """
+        c_surf = {'Cations': np.zeros(potential.shape),
+                  'Anions': np.zeros(potential.shape),
+                  'Solvent': np.zeros(potential.shape)}
+
         y_0 = C.BETA*C.Z*C.E_0*potential  # dimensionless potential
         chg = np.sqrt(4 * C.K_B * C.T * C.EPS_0 * C.EPS_R_WATER * self.n_0 / self.chi_0) \
             * np.sqrt(np.log(self.chi_0 * np.cosh(y_0) - self.chi_0 + 1)) * y_0 / np.abs(y_0)
@@ -272,8 +304,10 @@ class Borukhov(DoubleLayerModel):
             / (self.chi_0 * np.cosh(y_0) - self.chi_0 + 1) \
             / (2*np.sqrt(np.log(self.chi_0 * np.cosh(y_0) - self.chi_0 + 1))) \
             * 1e2 # uF/cm^2
+        efield = np.zeros(potential.shape)
+
         return PotentialSweepSolution(
-            phi=potential, charge=chg, cap=cap, name=self.name + ' (Analytic)')
+            phi=potential, charge=chg, cap=cap, c_surf=c_surf, efield=efield, name=self.name + ' (Analytic)')
 
 
 class Abrashkin(DoubleLayerModel):
@@ -300,8 +334,8 @@ class Abrashkin(DoubleLayerModel):
 
         self.eps_r_opt = eps_r_opt
 
-        p_water = np.sqrt(3 * (C.EPS_R_WATER - self.eps_r_opt) * C.EPS_0 / (C.BETA * self.n_max))
-        self.p_tilde = p_water * self.kappa_debye / (C.Z * C.E_0)
+        self.p_water = np.sqrt(3 * (C.EPS_R_WATER - self.eps_r_opt) * C.EPS_0 / (C.BETA * self.n_max))
+        self.p_tilde = self.p_water * self.kappa_debye / (C.Z * C.E_0)
 
         self.name = f'LPB {self.c_0:.3f}M {gamma_c:.1f}-{gamma_a:.1f}'
 
@@ -650,7 +684,13 @@ class ProtonLPB(DoubleLayerModel):
         chg[i_pzc:], _ = self.sequential_solve(potential[i_pzc::1], tol, p_h)
 
         cap = np.gradient(chg, edge_order=2)/np.gradient(potential) * 1e2
-        return PotentialSweepSolution(phi=potential, charge=chg, cap=cap, name=self.name)
+
+        c_surf = {'Cations': np.zeros(potential.shape),
+                  'Anions': np.zeros(potential.shape),
+                  'Solvent': np.zeros(potential.shape)}
+        efield = np.zeros(potential.shape)
+
+        return PotentialSweepSolution(phi=potential, charge=chg, cap=cap, c_surf=c_surf, efield=efield, name=self.name)
 
     def spatial_profiles(self, phi0: float, tol: float=1e-3, p_h: float=7):
         """

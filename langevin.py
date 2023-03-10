@@ -61,7 +61,7 @@ def sinh_x_over_x(x): #pylint: disable=invalid-name
 
 def sinh_x1_over_x1_times_exp_x2(x1, x2): #pylint: disable=invalid-name
     """
-    Returns sinh(x1)/x1 * exp(x2). 
+    Returns sinh(x1)/x1 * exp(x2).
     """
     select = np.abs(x1) < 1e-9
     ret = np.zeros(x1.shape)
