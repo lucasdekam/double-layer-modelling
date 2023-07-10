@@ -29,12 +29,14 @@ def frumkin_corrected_current(model: edl.DoubleLayerModel,
 
     efield = np.zeros(potential_range_she.shape)
     c_cat = np.ones(potential_range_she.shape)
+    c_h2o = np.ones(potential_range_she.shape)
     for i, _ in enumerate(potential_range_she):
         efield[i] = sol.profiles[i].efield[0]
+        c_h2o[i] = sol.profiles[i].c_dict[r'Solvent'][0]
         if include_cat:
             c_cat[i] = sol.profiles[i].c_dict[r'Cations'][0]
 
-    current = - np.exp(-0.5*C.E_0*C.BETA * C.D_ADSORBATE_LAYER * efield) * c_cat
+    current = - np.exp(-0.5*C.E_0*C.BETA * C.D_ADSORBATE_LAYER * efield) * c_h2o
     return current
 
 def edl_transport_limited_current(model: edl.DoubleLayerModel,
@@ -56,8 +58,15 @@ def edl_transport_limited_current(model: edl.DoubleLayerModel,
     sol = model.potential_sweep(potential_range_she - pzc_she, p_h=p_h)
 
     phi_2 = np.zeros(potential_range_she.shape)
+    c_h2o = np.ones(potential_range_she.shape)
+    efield = np.zeros(potential_range_she.shape)
+
     for i, _ in enumerate(potential_range_she):
+        efield[i] = sol.profiles[i].efield[0]
+        c_h2o[i] = sol.profiles[i].c_dict[r'Solvent'][0]
         phi_2[i] = sol.profiles[i].phi[0]
 
     current = -np.exp(-C.E_0*C.BETA * phi_2)
+    # current = - np.exp(-0.5*C.E_0*C.BETA * C.D_ADSORBATE_LAYER * efield) * c_h2o
+
     return current
